@@ -1,169 +1,65 @@
-   # High-Performance Order Book With Rust
+# High-Performance Order Book in Rust
 
-A competitive programming challenge to build the fastest possible order book data structure in Rust. The goal is to achieve sub-nanosecond operations for critical hot-path functions.
+Course assignment (TD) from a low-latency programming class at ESILV, run as a speed competition.
+The teaching team provided the interface, benchmark harness and tests; **my implementation is in
+`src/orderbook.rs`**. The goal: make the hot path (`apply_update`, `get_spread`) as fast as possible.
 
-## Objective
-
-Complete the `OrderBook` trait implementation in `src/orderbook.rs` and optimize it for maximum performance. The faster your implementation, the better!
-
-## What is an Order Book?
-
-An order book is a fundamental data structure in financial trading systems that maintains:
-- **Bids**: Buy orders sorted by price (highest first)
-- **Asks**: Sell orders sorted by price (lowest first)
-- **Price levels**: Each price point with its associated quantity
-
-## Project Structure
+## Project structure
 
 ```
 src/
-├── main.rs          # Entry point with benchmarks and tests
-├── interfaces.rs    # OrderBook trait and type definitions
-├── orderbook.rs     # Your implementation goes here (currently TODO)
-└── benchmarks.rs    # Comprehensive benchmarking framework
+├── orderbook.rs     # My implementation (price-indexed arrays + bitsets)
+├── interfaces.rs    # OrderBook trait and types (provided)
+├── benchmarks.rs    # Benchmark harness (provided)
+└── main.rs          # Entry point, benchmarks and correctness tests (provided)
 ```
 
-## Implementation Requirements
+## Design
 
-Implement the `OrderBook` trait with the following methods:
+**Price-indexed arrays instead of trees.** Bids and asks are stored in flat `Vec<u64>`
+indexed directly by price. Updates and lookups are O(1), with no allocation on the hot path.
 
-### Core Operations (HOT PATH - Optimize heavily!)
-- `apply_update(&mut self, update: Update)` - Add/update/remove price levels
-- `get_spread(&self) -> Option<Price>` - Calculate bid-ask spread
+**64-bit bitsets for best-price lookup.** Each side keeps a bitmask with one bit per price level
+(64 levels per block). When the best level is removed, the next best price is found with a single
+`leading_zeros` (bids) or `trailing_zeros` (asks) instruction per block, instead of scanning prices.
 
-### Query Operations
-- `get_best_bid(&self) -> Option<Price>` - Get highest bid price
-- `get_best_ask(&self) -> Option<Price>` - Get lowest ask price
-- `get_quantity_at(&self, price: Price, side: Side) -> Option<Quantity>`
-- `get_top_levels(&self, side: Side, n: usize) -> Vec<(Price, Quantity)>`
-- `get_total_quantity(&self, side: Side) -> Quantity`
+**Cached state.** Best bid, best ask and total quantity per side are maintained incrementally,
+so `get_spread`, `get_best_bid/ask` and `get_total_quantity` are O(1) reads.
 
-## Getting Started
+**Hot-path tuning.** `#[inline(always)]` on the update path and unchecked indexing
+to remove bounds checks inside the critical loop.
 
-1. **Clone and setup**:
-   ```bash
-   cargo build --release
-   ```
+## Benchmarks
 
-2. **Implement the trait** in `src/orderbook.rs`:
-   ```rust
-   use std::collections::BTreeMap;
+Measured with the provided harness, `cargo run --release`, 100,000 operations:
 
-   pub struct OrderBookImpl {
-       bids: BTreeMap<Price, Quantity>,
-       asks: BTreeMap<Price, Quantity>,
-   }
+| Operation       | Latency  |
+|-----------------|----------|
+| Update (avg)    | 0.87 ns  |
+| Update (P50)    | 0.75 ns  |
+| Update (P95)    | 1.38 ns  |
+| Update (P99)    | 1.67 ns  |
+| Get best bid    | 0.31 ns  |
+| Get best ask    | 0.31 ns  |
+| Get spread      | 0.32 ns  |
+| Random read     | 0.32 ns  |
 
-   impl OrderBook for OrderBookImpl {
-       fn new() -> Self {
-           OrderBookImpl {
-               bids: BTreeMap::new(),
-               asks: BTreeMap::new(),
-           }
-       }
-       // ... implement other methods
-   }
-   ```
+Note: the harness repeats each update in batches of 1,000 to amortise timer overhead, so these
+figures reflect cache-hot, amortised throughput rather than isolated single-operation latency.
 
-3. **Run tests** to verify correctness:
-   ```bash
-   cargo test
-   ```
+## Trade-offs and next steps
 
-4. **Run benchmarks** to measure performance:
-   ```bash
-   cargo run --release
-   ```
+- Memory scales with the price range (fixed `MAX_PRICE`), which suits a bounded tick grid
+  but not an unbounded one.
+- Unchecked indexing assumes prices are validated upstream. A production version would
+  validate input at the boundary.
+- `get_top_levels` scans price by price; it could reuse the bitsets to skip empty blocks.
+- Next step: measure single-operation latency on randomised updates (cold cache, varying prices)
+  to get a more realistic picture.
 
-## Benchmark Metrics
+## Run
 
-The benchmark suite measures:
-- **Update operations** (avg, P50, P95, P99)
-- **Get best bid/ask** latency
-- **Spread calculation** latency
-- **Random reads** performance
-- **Total operations**: 100,000 iterations
-
-Example output:
+```bash
+cargo test            # correctness
+cargo run --release   # benchmarks
 ```
-============================================================
-  BENCHMARK RESULTS: OrderBook
-============================================================
-  Total Operations: 100000
-  ---
-  Update Operations:
-    Average: 45.23 ns
-    P50:     42 ns
-    P95:     67 ns
-    P99:     89 ns
-  ---
-  Get Best Bid:
-    Average: 12.45 ns
-  ...
-```
-
-## Optimization Tips
-
-1. **Data Structures**: Carefully chose your data structure. It will be the most critical choice
-
-2. **Hot Path Optimization**:
-   - Minimize allocations in `apply_update()`
-   - Maximize cache usage
-
-3. **Profiling Tools**:
-   ```bash
-   # Install flamegraph
-   cargo install flamegraph
-
-   # Generate flame graph
-   cargo flamegraph
-
-   # Run micro-benchmarks
-   cargo bench
-   ```
-
-4. **Advanced Techniques**:
-   - SIMD for batch operations
-   - Lock-free data structures
-   - Memory pooling for allocations
-   - Branch prediction optimization
-
-## Competition Goal
-
-**Achieve sub-nanosecond operations!**
-
-##  Correctness Tests
-
-Two test suites ensure implementation correctness:
-
-1. **Basic Operations**: Tests bid/ask insertion and queries
-2. **Updates & Removes**: Tests quantity updates and level removal
-
-All tests must pass before benchmarking.
-
-## Type Definitions
-
-```rust
-// Price in units of 10^-4 (e.g., 10000 = 1.0000)
-pub type Price = i64;
-
-// Quantity at a price level
-pub type Quantity = u64;
-
-// Order side
-pub enum Side { Bid, Ask }
-
-// Update operations
-pub enum Update {
-    Set { price: Price, quantity: Quantity, side: Side },
-    Remove { price: Price, side: Side },
-}
-```
-
-## Contributing
-
-This is a competitive programming challenge. May the fastest implementation win!
-
----
-
-**Good luck and happy optimizing!**
